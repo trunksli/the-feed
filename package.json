@@ -1,0 +1,14 @@
+{
+  "name": "the-feed",
+  "version": "1.0.0",
+  "description": "A content aggregation dashboard that curates the newest content from across the web",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "rss-parser": "^3.13.0"
+  }
+}
