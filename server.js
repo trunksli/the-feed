@@ -217,8 +217,8 @@ app.post('/api/refresh', async (req, res) => {
 
 // ─── Start Server ─────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
-  console.log(`\n  🗞️  The Feed is running at http://localhost:${PORT}\n`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`\n  🗞️  The Feed is running on port ${PORT}\n`);
   // Pre-warm the cache on startup
   fetchAllFeeds().catch(err => console.error('[Startup] Pre-warm failed:', err));
 });
