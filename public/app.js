@@ -1,12 +1,14 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    The Feed — Frontend Application
-   Fetches /api/feed, renders categorized cards, handles refresh
+   Fetches /api/feed, renders categorized cards, polls for server-side updates
    ═══════════════════════════════════════════════════════════════════════════ */
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-const AUTO_REFRESH_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
-const STORAGE_KEY = 'thefeed_last_refresh';
+// The server refreshes feeds on its own schedule. We just poll the cached
+// payload and re-render when its fetchedAt changes — cheap, no network fanout.
+const POLL_INTERVAL = 5 * 60 * 1000;   // 5 minutes
+const CLOCK_INTERVAL = 60 * 1000;      // re-tick "3m ago" labels
 
 const CATEGORY_CONFIG = {
   news:   { emoji: '📰', label: 'Top News' },
@@ -26,44 +28,65 @@ const loadingState = document.getElementById('loading-state');
 const errorState = document.getElementById('error-state');
 const feedContainer = document.getElementById('feed-container');
 const refreshBtn = document.getElementById('refresh-btn');
+const retryBtn = document.getElementById('retry-btn');
 const lastUpdatedEl = document.getElementById('last-updated');
+
+// ─── State ────────────────────────────────────────────────────────────────────
+
+let renderedAt = null;   // fetchedAt of what's currently on screen
+let hasRendered = false; // have we ever painted the feed?
 
 // ─── Fetch Feed ───────────────────────────────────────────────────────────────
 
-async function loadFeed(forceRefresh = false) {
-  showLoading();
+/**
+ * @param {object} opts
+ * @param {boolean} opts.force    ask the server to re-pull from source feeds
+ * @param {boolean} opts.silent   background poll — don't blank the page
+ */
+async function loadFeed({ force = false, silent = false } = {}) {
+  if (!silent) showLoading();
 
   try {
-    const url = forceRefresh ? '/api/refresh' : '/api/feed';
-    const options = forceRefresh ? { method: 'POST' } : {};
-    const response = await fetch(url, options);
+    const response = force
+      ? await fetch('/api/refresh', { method: 'POST' })
+      : await fetch('/api/feed');
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
     const data = await response.json();
+
+    // Nothing new upstream — leave the DOM alone.
+    if (data.fetchedAt === renderedAt && hasRendered) {
+      hideLoading();
+      return;
+    }
+
     renderFeed(data);
-    updateLastRefreshed(data.fetchedAt);
-    localStorage.setItem(STORAGE_KEY, Date.now().toString());
+    renderedAt = data.fetchedAt;
+    updateLastRefreshed();
   } catch (err) {
     console.error('Failed to load feed:', err);
-    showError();
+    // A failed background poll shouldn't tear down a page that's already good.
+    if (!silent || !hasRendered) showError();
+    else hideLoading();
   }
 }
 
 // ─── Render ───────────────────────────────────────────────────────────────────
 
 function renderFeed(data) {
-  feedContainer.innerHTML = '';
+  const fragment = document.createDocumentFragment();
 
   for (const catKey of CATEGORY_ORDER) {
     const items = data.categories[catKey];
     if (!items || items.length === 0) continue;
 
     const config = CATEGORY_CONFIG[catKey] || { emoji: '📄', label: catKey };
-    const section = createCategorySection(catKey, config, items);
-    feedContainer.appendChild(section);
+    fragment.appendChild(createCategorySection(catKey, config, items));
   }
 
+  feedContainer.replaceChildren(fragment);
+  hasRendered = true;
   hideLoading();
   feedContainer.classList.remove('hidden');
 }
@@ -93,20 +116,21 @@ function createCategorySection(categoryKey, config, items) {
 function createCard(item) {
   const card = document.createElement('a');
   card.className = 'feed-card';
-  card.href = item.url;
+  card.href = safeUrl(item.url) || '#';
   card.target = '_blank';
   card.rel = 'noopener noreferrer';
 
-  const imageHtml = item.image
-    ? `<img class="card-image" src="${escapeHtml(item.image)}" alt="" loading="lazy" onerror="this.remove()">`
+  const imageUrl = safeUrl(item.image);
+  const imageHtml = imageUrl
+    ? `<img class="card-image" src="${escapeHtml(imageUrl)}" alt="" loading="lazy" onerror="this.remove()">`
     : '';
 
   card.innerHTML = `
     ${imageHtml}
     <div class="card-body">
       <div class="card-meta">
-        <span class="source-badge" data-category="${item.category}">${escapeHtml(item.source)}</span>
-        <span class="card-timestamp">${formatTime(item.timestamp)}</span>
+        <span class="source-badge" data-category="${escapeHtml(item.category)}">${escapeHtml(item.source)}</span>
+        <span class="card-timestamp" data-timestamp="${escapeHtml(item.timestamp)}">${formatTime(item.timestamp)}</span>
       </div>
       <h3 class="card-title">${escapeHtml(item.title)}</h3>
       ${item.summary ? `<p class="card-summary">${escapeHtml(item.summary)}</p>` : ''}
@@ -123,10 +147,13 @@ function createCard(item) {
 // ─── UI State Helpers ─────────────────────────────────────────────────────────
 
 function showLoading() {
-  loadingState.classList.remove('hidden');
   errorState.classList.add('hidden');
-  feedContainer.classList.add('hidden');
   refreshBtn.classList.add('loading');
+  // Only blank the page if there's nothing worth keeping on screen.
+  if (!hasRendered) {
+    loadingState.classList.remove('hidden');
+    feedContainer.classList.add('hidden');
+  }
 }
 
 function hideLoading() {
@@ -142,18 +169,35 @@ function showError() {
   refreshBtn.classList.remove('loading');
 }
 
-function updateLastRefreshed(isoDate) {
-  const date = new Date(isoDate);
-  const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const dateStr = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  lastUpdatedEl.textContent = `Updated ${dateStr} at ${timeStr}`;
+function updateLastRefreshed() {
+  if (!renderedAt) return;
+  lastUpdatedEl.textContent = `Updated ${formatTime(renderedAt)}`;
+}
+
+/** Re-tick every relative timestamp on the page without refetching. */
+function retickTimestamps() {
+  updateLastRefreshed();
+  for (const el of document.querySelectorAll('.card-timestamp')) {
+    el.textContent = formatTime(el.dataset.timestamp);
+  }
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
+/** Feed content is untrusted; never hand a javascript: URL to href or src. */
+function safeUrl(url) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 function escapeHtml(str) {
   const div = document.createElement('div');
-  div.textContent = str;
+  div.textContent = str == null ? '' : str;
   return div.innerHTML;
 }
 
@@ -161,8 +205,9 @@ function formatTime(isoDate) {
   if (!isoDate) return '';
 
   const date = new Date(isoDate);
-  const now = new Date();
-  const diffMs = now - date;
+  if (Number.isNaN(date.getTime())) return '';
+
+  const diffMs = Date.now() - date;
   const diffMins = Math.floor(diffMs / 60000);
   const diffHours = Math.floor(diffMs / 3600000);
   const diffDays = Math.floor(diffMs / 86400000);
@@ -175,30 +220,19 @@ function formatTime(isoDate) {
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-// ─── Auto-Refresh Logic ──────────────────────────────────────────────────────
-
-function shouldAutoRefresh() {
-  const lastRefresh = localStorage.getItem(STORAGE_KEY);
-  if (!lastRefresh) return true;
-  return (Date.now() - parseInt(lastRefresh, 10)) > AUTO_REFRESH_INTERVAL;
-}
-
-function scheduleAutoRefresh() {
-  setInterval(() => {
-    if (shouldAutoRefresh()) {
-      console.log('[Auto-Refresh] Refreshing feed…');
-      loadFeed(true);
-    }
-  }, 60 * 60 * 1000); // Check every hour
-}
-
 // ─── Event Listeners ──────────────────────────────────────────────────────────
 
-refreshBtn.addEventListener('click', () => loadFeed(true));
+refreshBtn.addEventListener('click', () => loadFeed({ force: true }));
+retryBtn.addEventListener('click', () => loadFeed());
+
+// Catch up whenever the tab comes back to the foreground — a laptop that was
+// asleep for six hours should not show six-hour-old headlines.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') loadFeed({ silent: true });
+});
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', () => {
-  loadFeed(shouldAutoRefresh());
-  scheduleAutoRefresh();
-});
+loadFeed();
+setInterval(() => loadFeed({ silent: true }), POLL_INTERVAL);
+setInterval(retickTimestamps, CLOCK_INTERVAL);
