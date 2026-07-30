@@ -8,14 +8,27 @@
 # Required repo variable:  FEED_URL       e.g. https://the-feed-xxxx.onrender.com
 # Optional repo secret:    REFRESH_TOKEN  (copy from Render -> Environment)
 #
-# Note: GitHub's scheduled runs are best-effort and are often delayed 5-20 min
-# under load. For tighter timing use an external pinger (cron-job.org).
+# Note: GitHub's scheduled runs are best-effort, not guaranteed. Measured on
+# this repo over 3 days, a '*/15' schedule requested 287 runs and GitHub ran
+# 40 - an average gap of 108 min and a worst gap of 208 min. Every gap exceeded
+# Render's ~15 min sleep threshold. Requesting every 5 min raises the number
+# that survive throttling, but do NOT expect 5 min spacing.
+#
+# For genuinely reliable timing, use an external pinger (cron-job.org,
+# UptimeRobot) hitting /healthz. This workflow is the zero-extra-account option.
+#
+# GitHub also disables scheduled workflows after 60 days of repo inactivity.
 
 name: Keepalive
 
 on:
   schedule:
-    - cron: '*/15 * * * *'   # every 15 min (GitHub's minimum granularity is 5)
+    # Every 5 min (GitHub's minimum), offset off the :00/:05/:15/:30/:45
+    # boundaries where scheduled-workflow contention is worst.
+    # To slow this down, keep the +2 offset and drop minutes:
+    #   every 10 min -> '2,12,22,32,42,52 * * * *'
+    #   every 15 min -> '2,17,32,47 * * * *'
+    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
   workflow_dispatch:          # lets you run it manually from the Actions tab
 
 concurrency:
