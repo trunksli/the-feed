@@ -2,7 +2,9 @@ services:
   - type: web
     name: the-feed
     runtime: node
-    plan: free
+    # Paid instance: always on, never spins down. The in-app refresh timer
+    # below only works because the process stays alive.
+    plan: starter
     buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /healthz
