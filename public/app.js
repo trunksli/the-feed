@@ -30,6 +30,7 @@ const feedContainer = document.getElementById('feed-container');
 const refreshBtn = document.getElementById('refresh-btn');
 const retryBtn = document.getElementById('retry-btn');
 const lastUpdatedEl = document.getElementById('last-updated');
+const statusBanner = document.getElementById('status-banner');
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -74,6 +75,32 @@ async function loadFeed({ force = false, silent = false } = {}) {
 
 // ─── Render ───────────────────────────────────────────────────────────────────
 
+/**
+ * Surface a notice only once enough sources are failing for the server to
+ * consider itself degraded. One flaky feed is normal and stays quiet.
+ */
+function renderStatusBanner(health) {
+  if (!health || !health.degraded) {
+    statusBanner.classList.add('hidden');
+    return;
+  }
+
+  const failing = health.failing || [];
+  statusBanner.replaceChildren();
+
+  const icon = document.createElement('span');
+  icon.className = 'status-banner-icon';
+  icon.textContent = '⚠️';
+
+  const text = document.createElement('span');
+  text.textContent =
+    `Showing ${health.ok} of ${health.total} sources.` +
+    (failing.length ? ` Currently unavailable: ${failing.join(', ')}.` : '');
+
+  statusBanner.append(icon, text);
+  statusBanner.classList.remove('hidden');
+}
+
 function renderFeed(data) {
   const fragment = document.createDocumentFragment();
 
@@ -86,6 +113,7 @@ function renderFeed(data) {
   }
 
   feedContainer.replaceChildren(fragment);
+  renderStatusBanner(data.health);
   hasRendered = true;
   hideLoading();
   feedContainer.classList.remove('hidden');
@@ -166,6 +194,7 @@ function showError() {
   loadingState.classList.add('hidden');
   errorState.classList.remove('hidden');
   feedContainer.classList.add('hidden');
+  statusBanner.classList.add('hidden');
   refreshBtn.classList.remove('loading');
 }
 
