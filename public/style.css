@@ -138,6 +138,51 @@ a {
   white-space: nowrap;
 }
 
+/* ─── Region Picker ────────────────────────────────────────────────────────── */
+
+.region-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: rgba(52, 211, 153, 0.1);
+  border: 1px solid rgba(52, 211, 153, 0.2);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.region-picker:hover {
+  background: rgba(52, 211, 153, 0.16);
+  border-color: rgba(52, 211, 153, 0.35);
+}
+
+.region-picker-label {
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.region-picker select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--cat-local);
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding-right: 2px;
+  max-width: 15ch;
+  text-overflow: ellipsis;
+}
+
+/* The dropdown list itself renders in the OS palette, so force dark there. */
+.region-picker select option {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
 .refresh-btn {
   display: flex;
   align-items: center;

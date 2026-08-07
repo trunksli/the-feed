@@ -46,7 +46,12 @@ const ALERT_WEBHOOK_URL = process.env.ALERT_WEBHOOK_URL || null;
 // times out there, though it responds in under a second from a home
 // connection). They're kept so /api/status shows if they ever come back, and
 // so the alert threshold isn't permanently tripped by a known condition.
-const FEED_SOURCES = [
+//
+// Sources are split into two kinds of collection: NATIONAL_SOURCES, shared by
+// every reader, and one per-metro collection in METROS. Both are just named
+// lists of the same source shape — the fetch, health and alerting machinery
+// treats them identically.
+const NATIONAL_SOURCES = [
   // 📰 Major News
   { url: 'http://feeds.bbci.co.uk/news/rss.xml', category: 'news', sourceName: 'BBC News', maxItems: 3 },
   { url: 'https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml', category: 'news', sourceName: 'New York Times', maxItems: 3 },
@@ -59,13 +64,6 @@ const FEED_SOURCES = [
   // Direct-RSS stand-ins for the wire services lost to the Google News block.
   { url: 'https://www.theguardian.com/us-news/rss', category: 'news', sourceName: 'Guardian US', maxItems: 2 },
   { url: 'https://feeds.nbcnews.com/nbcnews/public/news', category: 'news', sourceName: 'NBC News', maxItems: 2 },
-
-  // 📍 Local — West LA
-  { url: 'https://www.latimes.com/california/rss2.0.xml', category: 'local', sourceName: 'LA Times', maxItems: 3 },
-  { url: 'https://ktla.com/news/local-news/feed/', category: 'local', sourceName: 'KTLA', maxItems: 3 },
-  { url: 'https://abc7.com/feed/', category: 'local', sourceName: 'ABC7 LA', maxItems: 2 },
-  { url: 'https://laist.com/index.rss', category: 'local', sourceName: 'LAist', maxItems: 3 },
-  { url: 'https://news.google.com/rss/search?q=west+los+angeles+OR+%22west+LA%22+when:7d&hl=en-US&gl=US&ceid=US:en', category: 'local', sourceName: 'West LA News', maxItems: 3, knownBlocked: true },
 
   // 🏆 Sports
   { url: 'https://www.espn.com/espn/rss/news', category: 'sports', sourceName: 'ESPN', maxItems: 4 },
@@ -85,13 +83,105 @@ const FEED_SOURCES = [
   { url: 'https://www.fark.com/fark.rss', category: 'more', sourceName: 'Fark', maxItems: 4 },
 ];
 
+// Per-metro local sources. `primaryFor` lists the IANA timezones this metro
+// should win as the first-visit default — a timezone identifies the zone, not
+// the city, so Pacific resolves to LA and Eastern to New York. Metros without
+// it (SF, Seattle, Boston, DC) are reachable only by picking them, which the
+// reader's choice then persists.
+const METROS = {
+  la: {
+    label: 'Los Angeles',
+    primaryFor: ['America/Los_Angeles', 'America/Tijuana', 'America/Vancouver'],
+    sources: [
+      { url: 'https://www.latimes.com/california/rss2.0.xml', sourceName: 'LA Times', maxItems: 3 },
+      { url: 'https://ktla.com/news/local-news/feed/', sourceName: 'KTLA', maxItems: 3 },
+      { url: 'https://abc7.com/feed/', sourceName: 'ABC7 LA', maxItems: 2 },
+      { url: 'https://laist.com/index.rss', sourceName: 'LAist', maxItems: 3 },
+      { url: 'https://news.google.com/rss/search?q=west+los+angeles+OR+%22west+LA%22+when:7d&hl=en-US&gl=US&ceid=US:en', sourceName: 'West LA News', maxItems: 3, knownBlocked: true },
+    ],
+  },
+  nyc: {
+    label: 'New York',
+    primaryFor: ['America/New_York', 'America/Detroit', 'America/Toronto'],
+    sources: [
+      { url: 'https://gothamist.com/feed', sourceName: 'Gothamist', maxItems: 3 },
+      { url: 'https://abc7ny.com/feed/', sourceName: 'ABC7 NY', maxItems: 2 },
+      { url: 'https://www.nbcnewyork.com/?rss=y', sourceName: 'NBC New York', maxItems: 2 },
+      { url: 'https://www.nydailynews.com/feed/', sourceName: 'NY Daily News', maxItems: 2 },
+      { url: 'https://www.amny.com/feed/', sourceName: 'amNY', maxItems: 2 },
+    ],
+  },
+  chi: {
+    label: 'Chicago',
+    primaryFor: ['America/Chicago', 'America/Winnipeg'],
+    sources: [
+      { url: 'https://www.chicagotribune.com/feed/', sourceName: 'Chicago Tribune', maxItems: 3 },
+      { url: 'https://abc7chicago.com/feed/', sourceName: 'ABC7 Chicago', maxItems: 2 },
+      { url: 'https://www.nbcchicago.com/?rss=y', sourceName: 'NBC Chicago', maxItems: 2 },
+      { url: 'https://blockclubchicago.org/feed/', sourceName: 'Block Club Chicago', maxItems: 2 },
+      { url: 'https://chicago.suntimes.com/rss/index.xml', sourceName: 'Chicago Sun-Times', maxItems: 2 },
+    ],
+  },
+  sf: {
+    label: 'San Francisco Bay Area',
+    sources: [
+      { url: 'https://www.sfgate.com/rss/feed/Bay-Area-News-429.php', sourceName: 'SFGate', maxItems: 3 },
+      { url: 'https://abc7news.com/feed/', sourceName: 'ABC7 News SF', maxItems: 2 },
+      // KQED's documented /news/feed path 404s; ww2 is the one that serves.
+      { url: 'https://ww2.kqed.org/news/feed/', sourceName: 'KQED', maxItems: 2 },
+      { url: 'https://www.mercurynews.com/feed/', sourceName: 'Mercury News', maxItems: 2 },
+      { url: 'https://sfstandard.com/feed/', sourceName: 'SF Standard', maxItems: 2 },
+    ],
+  },
+  sea: {
+    label: 'Seattle',
+    sources: [
+      { url: 'https://www.seattletimes.com/feed/', sourceName: 'Seattle Times', maxItems: 4 },
+      { url: 'https://www.king5.com/feeds/syndication/rss/news/local', sourceName: 'KING5', maxItems: 3 },
+      { url: 'https://mynorthwest.com/feed/', sourceName: 'MyNorthwest', maxItems: 3 },
+    ],
+  },
+  bos: {
+    label: 'Boston',
+    sources: [
+      { url: 'https://www.boston.com/feed/', sourceName: 'Boston.com', maxItems: 4 },
+      { url: 'https://www.nbcboston.com/?rss=y', sourceName: 'NBC Boston', maxItems: 3 },
+      { url: 'https://www.bostonherald.com/feed/', sourceName: 'Boston Herald', maxItems: 3 },
+    ],
+  },
+  dc: {
+    label: 'Washington DC',
+    sources: [
+      { url: 'https://www.nbcwashington.com/?rss=y', sourceName: 'NBC Washington', maxItems: 3 },
+      { url: 'https://wtop.com/feed/', sourceName: 'WTOP', maxItems: 3 },
+      { url: 'https://wamu.org/feed/', sourceName: 'WAMU', maxItems: 2 },
+      { url: 'https://www.dcnewsnow.com/feed/', sourceName: 'DC News Now', maxItems: 2 },
+    ],
+  },
+};
+
+const DEFAULT_REGION = 'la';
+
+// Metro sources carry category 'local' implicitly — set it once here rather
+// than repeating it on every entry above.
+for (const metro of Object.values(METROS)) {
+  for (const source of metro.sources) source.category = 'local';
+}
+
+// Every source across every collection, for health reporting and iteration.
+const ALL_SOURCES = [
+  ...NATIONAL_SOURCES,
+  ...Object.values(METROS).flatMap(m => m.sources),
+];
+
 // ─── State ────────────────────────────────────────────────────────────────────
 
-let cachedFeed = null;          // last successfully built feed
+let nationalCache = null;       // { fetchedAt, categories } shared by everyone
 let lastForcedRefresh = 0;      // rate-limit guard for POST /api/refresh
 let inFlight = null;            // de-dupes concurrent fetches
 let lastCycle = null;           // summary of the most recent refresh cycle
 let alerting = false;           // edge-trigger guard so we alert on change only
+const metroCache = new Map();   // regionId -> { fetchedAt, items }
 const lastGoodBySource = new Map(); // sourceName -> items, for stale fallback
 
 // sourceName -> { status, lastSuccessAt, lastFailureAt, consecutiveFailures,
@@ -290,10 +380,10 @@ function dedupe(items) {
 }
 
 /**
- * Roll per-source health up into a summary of the cycle that just finished.
+ * Summarize one named collection's health from the per-source records.
  */
-function summarizeCycle(durationMs, totalItems) {
-  const entries = FEED_SOURCES.map(s => ({
+function summarizeCollection(name, sources) {
+  const entries = sources.map(s => ({
     source: s.sourceName,
     ...(sourceHealth.get(s.sourceName) || { status: 'down', knownBlocked: Boolean(s.knownBlocked) }),
   }));
@@ -302,12 +392,12 @@ function summarizeCycle(durationMs, totalItems) {
   // Known-blocked sources are excluded from the alert count — they'd otherwise
   // hold the alert permanently on and drown out anything new.
   const unexpected = failures.filter(e => !e.knownBlocked);
+  const eligible = sources.filter(s => !s.knownBlocked).length;
 
   return {
-    at: new Date().toISOString(),
-    durationMs,
-    totalItems,
-    sourcesTotal: FEED_SOURCES.length,
+    collection: name,
+    total: sources.length,
+    eligible,
     ok: entries.filter(e => e.status === 'ok').length,
     stale: entries.filter(e => e.status === 'stale').length,
     down: entries.filter(e => e.status === 'down').length,
@@ -318,6 +408,44 @@ function summarizeCycle(durationMs, totalItems) {
       error: e.lastError,
       consecutiveFailures: e.consecutiveFailures,
     })),
+  };
+}
+
+/**
+ * Roll every collection up into a summary of the cycle that just finished.
+ *
+ * A flat failure count across ~45 sources would be meaningless, so each
+ * collection is judged on its own: national trips at ALERT_THRESHOLD, and a
+ * metro trips when it loses more than half of what it could serve — losing 2
+ * of 3 Seattle feeds matters even though 2 is under the national threshold.
+ */
+function summarizeCycle(durationMs, totalItems) {
+  const collections = [
+    summarizeCollection('national', NATIONAL_SOURCES),
+    ...Object.entries(METROS).map(([id, m]) => summarizeCollection(id, m.sources)),
+  ];
+
+  const breached = collections.filter(c => {
+    const n = c.unexpectedFailures.length;
+    if (!n) return false;
+    return c.collection === 'national'
+      ? n >= ALERT_THRESHOLD
+      : n > c.eligible / 2;
+  });
+
+  return {
+    at: new Date().toISOString(),
+    durationMs,
+    totalItems,
+    sourcesTotal: ALL_SOURCES.length,
+    ok: collections.reduce((a, c) => a + c.ok, 0),
+    stale: collections.reduce((a, c) => a + c.stale, 0),
+    down: collections.reduce((a, c) => a + c.down, 0),
+    knownBlocked: collections.flatMap(c => c.knownBlocked),
+    collections,
+    breached,
+    // Kept flat for the frontend banner and for /healthz.
+    unexpectedFailures: collections.flatMap(c => c.unexpectedFailures),
   };
 }
 
@@ -348,24 +476,27 @@ async function sendWebhook(title, lines) {
  * cycle.
  */
 async function evaluateAlert(cycle) {
-  const count = cycle.unexpectedFailures.length;
+  const breached = cycle.breached;
 
-  if (count >= ALERT_THRESHOLD && !alerting) {
+  if (breached.length && !alerting) {
     alerting = true;
-    const lines = cycle.unexpectedFailures.map(
-      f => `• ${f.source} — ${f.status} (${f.consecutiveFailures}x): ${f.error}`
-    );
-    console.error(`[ALERT] ${count} sources failing:\n${lines.join('\n')}`);
-    await sendWebhook(`🚨 The Feed: ${count} sources failing`, [
-      ...lines,
-      `Serving ${cycle.totalItems} items from ${cycle.ok}/${cycle.sourcesTotal} sources.`,
+    const lines = breached.flatMap(c => [
+      `${c.collection}: ${c.unexpectedFailures.length}/${c.eligible} sources failing`,
+      ...c.unexpectedFailures.map(
+        f => `  • ${f.source} — ${f.status} (${f.consecutiveFailures}x): ${f.error}`
+      ),
     ]);
+    console.error(`[ALERT] ${breached.length} collection(s) degraded:\n${lines.join('\n')}`);
+    await sendWebhook(
+      `🚨 The Feed: ${breached.map(c => c.collection).join(', ')} degraded`,
+      [...lines, `Serving ${cycle.totalItems} items from ${cycle.ok}/${cycle.sourcesTotal} sources.`]
+    );
     return;
   }
 
-  if (count < ALERT_THRESHOLD && alerting) {
+  if (!breached.length && alerting) {
     alerting = false;
-    console.log(`[ALERT] Recovered — ${count} sources failing, below threshold of ${ALERT_THRESHOLD}`);
+    console.log('[ALERT] Recovered — every collection back within threshold');
     await sendWebhook('✅ The Feed: recovered', [
       `${cycle.ok}/${cycle.sourcesTotal} sources OK, ${cycle.totalItems} items.`,
     ]);
@@ -373,26 +504,31 @@ async function evaluateAlert(cycle) {
 }
 
 /**
- * Fetch every source concurrently and build the response payload.
+ * Fetch one collection's sources concurrently and return deduped items.
  */
-async function buildFeed() {
-  console.log('[Fetch] Fetching all feeds…');
+async function fetchCollection(sources) {
+  const results = await Promise.allSettled(sources.map(source => fetchSource(source)));
+  return dedupe(results.filter(r => r.status === 'fulfilled').flatMap(r => r.value));
+}
+
+/**
+ * Refresh national and every metro in a single pass. All sources go out
+ * concurrently, so wall-clock time is the slowest feed, not the sum.
+ */
+async function buildAll() {
+  console.log(`[Fetch] Fetching ${ALL_SOURCES.length} feeds across ${Object.keys(METROS).length + 1} collections…`);
   const startTime = Date.now();
 
-  const results = await Promise.allSettled(
-    FEED_SOURCES.map(source => fetchSource(source))
-  );
+  const metroIds = Object.keys(METROS);
+  const [nationalItems, ...metroItemLists] = await Promise.all([
+    fetchCollection(NATIONAL_SOURCES),
+    ...metroIds.map(id => fetchCollection(METROS[id].sources)),
+  ]);
 
-  const allItems = dedupe(
-    results.filter(r => r.status === 'fulfilled').flatMap(r => r.value)
-  );
-
-  // Group into categories, newest first within each.
+  // Group national items into categories, newest first within each.
   const categories = {};
-  for (const item of allItems) {
-    if (!categories[item.category]) {
-      categories[item.category] = [];
-    }
+  for (const item of nationalItems) {
+    if (!categories[item.category]) categories[item.category] = [];
     categories[item.category].push(item);
   }
   for (const cat of Object.keys(categories)) {
@@ -400,32 +536,29 @@ async function buildFeed() {
   }
 
   const durationMs = Date.now() - startTime;
-  const cycle = summarizeCycle(durationMs, allItems.length);
+  const totalItems = nationalItems.length + metroItemLists.reduce((a, l) => a + l.length, 0);
+  const cycle = summarizeCycle(durationMs, totalItems);
   lastCycle = cycle;
 
-  const feed = {
-    fetchedAt: cycle.at,
-    fetchDurationMs: durationMs,
-    totalItems: allItems.length,
-    categories,
-    // Small enough for the frontend to show a degraded banner without a
-    // second request.
-    health: {
-      ok: cycle.ok,
-      total: cycle.sourcesTotal,
-      degraded: cycle.unexpectedFailures.length >= ALERT_THRESHOLD,
-      failing: cycle.unexpectedFailures.map(f => f.source),
-    },
-  };
+  const national = { fetchedAt: cycle.at, categories, itemCount: nationalItems.length };
+  const metros = new Map(
+    metroIds.map((id, i) => [
+      id,
+      {
+        fetchedAt: cycle.at,
+        items: [...metroItemLists[i]].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)),
+      },
+    ])
+  );
 
   console.log(
-    `[Fetch] Done — ${allItems.length} items in ${durationMs}ms | ` +
+    `[Fetch] Done — ${totalItems} items in ${durationMs}ms | ` +
     `sources ok=${cycle.ok} stale=${cycle.stale} down=${cycle.down}` +
     (cycle.knownBlocked.length ? ` (known-blocked: ${cycle.knownBlocked.join(', ')})` : '')
   );
   if (cycle.unexpectedFailures.length) {
     console.warn(
-      `[Fetch] Unexpected failures: ` +
+      '[Fetch] Unexpected failures: ' +
       cycle.unexpectedFailures.map(f => `${f.source} (${f.error})`).join('; ')
     );
   }
@@ -433,26 +566,35 @@ async function buildFeed() {
   // Fire and forget — alerting must never delay or break a refresh.
   evaluateAlert(cycle).catch(err => console.error('[Alert] Failed:', err.message));
 
-  return feed;
+  return { national, metros };
 }
 
 /**
- * Refresh the cache. Concurrent callers share one in-flight fetch rather than
- * each kicking off their own. If the refresh produces nothing, the previous
- * cache is kept.
+ * Refresh every cache. Concurrent callers share one in-flight fetch rather than
+ * each kicking off their own. A collection that comes back empty keeps its
+ * previous contents rather than blanking the section.
  */
 async function refreshFeed() {
   if (inFlight) return inFlight;
 
   inFlight = (async () => {
     try {
-      const feed = await buildFeed();
-      if (feed.totalItems > 0 || !cachedFeed) {
-        cachedFeed = feed;
+      const { national, metros } = await buildAll();
+
+      if (national.itemCount > 0 || !nationalCache) {
+        nationalCache = national;
       } else {
-        console.warn('[Fetch] Refresh produced 0 items — keeping previous cache');
+        console.warn('[Fetch] National refresh produced 0 items — keeping previous cache');
       }
-      return cachedFeed;
+
+      for (const [id, entry] of metros) {
+        if (entry.items.length > 0 || !metroCache.has(id)) {
+          metroCache.set(id, entry);
+        } else {
+          console.warn(`[Fetch] ${id} refresh produced 0 items — keeping previous cache`);
+        }
+      }
+      return nationalCache;
     } finally {
       inFlight = null;
     }
@@ -470,22 +612,38 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', (req, res) => {
   res.json({
     ok: true,
-    hasCache: Boolean(cachedFeed),
-    fetchedAt: cachedFeed ? cachedFeed.fetchedAt : null,
-    totalItems: cachedFeed ? cachedFeed.totalItems : 0,
+    hasCache: Boolean(nationalCache),
+    fetchedAt: nationalCache ? nationalCache.fetchedAt : null,
+    totalItems: lastCycle ? lastCycle.totalItems : 0,
     sourcesOk: lastCycle ? lastCycle.ok : null,
-    sourcesTotal: FEED_SOURCES.length,
-    degraded: lastCycle ? lastCycle.unexpectedFailures.length >= ALERT_THRESHOLD : false,
+    sourcesTotal: ALL_SOURCES.length,
+    regions: Object.keys(METROS).length,
+    degraded: lastCycle ? lastCycle.breached.length > 0 : false,
+  });
+});
+
+// Regions available to the picker, with the timezones each one claims as its
+// first-visit default.
+app.get('/api/regions', (req, res) => {
+  res.json({
+    default: DEFAULT_REGION,
+    regions: Object.entries(METROS).map(([id, m]) => ({
+      id,
+      label: m.label,
+      primaryFor: m.primaryFor || [],
+      sources: m.sources.length,
+    })),
   });
 });
 
 // Per-source status report. `?format=text` returns a plain-text table that's
 // readable in a terminal or browser without tooling.
 app.get('/api/status', (req, res) => {
-  const sources = FEED_SOURCES.map(s => {
+  const describe = (s, collection) => {
     const h = sourceHealth.get(s.sourceName);
     return {
       source: s.sourceName,
+      collection,
       category: s.category,
       knownBlocked: Boolean(s.knownBlocked),
       status: h ? h.status : 'unknown',
@@ -494,7 +652,11 @@ app.get('/api/status', (req, res) => {
       lastSuccessAt: h ? h.lastSuccessAt : null,
       lastError: h ? h.lastError : null,
     };
-  });
+  };
+  const sources = [
+    ...NATIONAL_SOURCES.map(s => describe(s, 'national')),
+    ...Object.entries(METROS).flatMap(([id, m]) => m.sources.map(s => describe(s, id))),
+  ];
 
   const payload = {
     checkedAt: new Date().toISOString(),
@@ -515,24 +677,76 @@ app.get('/api/status', (req, res) => {
       ? `Last cycle: ${lastCycle.totalItems} items in ${lastCycle.durationMs}ms — ` +
         `ok=${lastCycle.ok} stale=${lastCycle.stale} down=${lastCycle.down}`
       : 'No refresh cycle has completed yet.',
-    `Alerting: ${alerting ? 'ACTIVE' : 'clear'} (threshold ${ALERT_THRESHOLD}, ` +
-      `webhook ${ALERT_WEBHOOK_URL ? 'configured' : 'not configured'})`,
-    '',
-    ...sources.map(s =>
-      `${(icon[s.status] || '?').padEnd(6)} ${s.source.padEnd(20)} ` +
+    `Alerting: ${alerting ? 'ACTIVE' : 'clear'} (national threshold ${ALERT_THRESHOLD}, ` +
+      `metro threshold >half, webhook ${ALERT_WEBHOOK_URL ? 'configured' : 'not configured'})`,
+  ];
+
+  // Group by collection so a broken metro reads as one block, not scattered rows.
+  for (const collection of ['national', ...Object.keys(METROS)]) {
+    const rows = sources.filter(s => s.collection === collection);
+    if (!rows.length) continue;
+    const summary = lastCycle && lastCycle.collections.find(c => c.collection === collection);
+    const label = collection === 'national' ? 'NATIONAL' : `${collection.toUpperCase()} — ${METROS[collection].label}`;
+    lines.push('', `── ${label}` + (summary ? `  (ok ${summary.ok}/${summary.total})` : ''));
+    lines.push(...rows.map(s =>
+      `  ${(icon[s.status] || '?').padEnd(6)} ${s.source.padEnd(20)} ` +
       `${String(s.items).padStart(2)} items  ${s.knownBlocked ? '[known-blocked] ' : ''}` +
       `${s.lastError ? '- ' + s.lastError : ''}`
-    ),
-  ];
+    ));
+  }
   res.type('text/plain').send(lines.join('\n'));
 });
+
+/**
+ * Assemble a reader's payload: the shared national cache plus one metro's
+ * local items. Both sides are already in memory, so this is a couple of object
+ * spreads — serving cost doesn't grow with the number of regions.
+ */
+function assembleFeed(regionId) {
+  const metro = metroCache.get(regionId);
+  const categories = { ...nationalCache.categories };
+  if (metro && metro.items.length) categories.local = metro.items;
+
+  const localCount = categories.local ? categories.local.length : 0;
+  const cycle = lastCycle;
+
+  return {
+    fetchedAt: nationalCache.fetchedAt,
+    fetchDurationMs: cycle ? cycle.durationMs : 0,
+    totalItems: nationalCache.itemCount + localCount,
+    region: { id: regionId, label: METROS[regionId].label },
+    regions: Object.entries(METROS).map(([id, m]) => ({ id, label: m.label })),
+    categories,
+    health: {
+      ok: cycle ? cycle.ok : 0,
+      total: ALL_SOURCES.length,
+      // Only surface a banner for problems that affect what this reader sees.
+      degraded: cycle
+        ? cycle.breached.some(c => c.collection === 'national' || c.collection === regionId)
+        : false,
+      failing: cycle
+        ? cycle.breached
+            .filter(c => c.collection === 'national' || c.collection === regionId)
+            .flatMap(c => c.unexpectedFailures.map(f => f.source))
+        : [],
+    },
+  };
+}
 
 // Feed data. Always served from cache — the background loop keeps it fresh, so
 // this never blocks on the network except on a cold start.
 app.get('/api/feed', async (req, res) => {
   try {
-    const feed = cachedFeed || await refreshFeed();
-    res.json(feed);
+    if (!nationalCache) await refreshFeed();
+
+    // An unrecognised region falls back to the default rather than guessing —
+    // better to show LA and let the picker correct it than invent a match.
+    const requested = String(req.query.region || '');
+    const regionId = Object.prototype.hasOwnProperty.call(METROS, requested)
+      ? requested
+      : DEFAULT_REGION;
+
+    res.json(assembleFeed(regionId));
   } catch (err) {
     console.error('[API Error]', err);
     res.status(500).json({ error: 'Failed to fetch feeds' });
@@ -549,14 +763,20 @@ app.post('/api/refresh', async (req, res) => {
     }
   }
 
+  const requested = String(req.query.region || '');
+  const regionId = Object.prototype.hasOwnProperty.call(METROS, requested)
+    ? requested
+    : DEFAULT_REGION;
+
   const now = Date.now();
-  if (now - lastForcedRefresh < MIN_FORCED_REFRESH_MS && cachedFeed) {
-    return res.json(cachedFeed); // too soon — hand back what we have
+  if (now - lastForcedRefresh < MIN_FORCED_REFRESH_MS && nationalCache) {
+    return res.json(assembleFeed(regionId)); // too soon — hand back what we have
   }
   lastForcedRefresh = now;
 
   try {
-    res.json(await refreshFeed());
+    await refreshFeed();
+    res.json(assembleFeed(regionId));
   } catch (err) {
     console.error('[API Error]', err);
     res.status(500).json({ error: 'Failed to refresh feeds' });

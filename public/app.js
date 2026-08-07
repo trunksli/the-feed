@@ -9,10 +9,11 @@
 // payload and re-render when its fetchedAt changes — cheap, no network fanout.
 const POLL_INTERVAL = 5 * 60 * 1000;   // 5 minutes
 const CLOCK_INTERVAL = 60 * 1000;      // re-tick "3m ago" labels
+const REGION_KEY = 'thefeed_region';   // remembers an explicit choice
 
 const CATEGORY_CONFIG = {
   news:   { emoji: '📰', label: 'Top News' },
-  local:  { emoji: '📍', label: 'Local — West LA' },
+  local:  { emoji: '📍', label: 'Local' },
   sports: { emoji: '🏆', label: 'Sports' },
   reddit: { emoji: '💬', label: 'Reddit' },
   video:  { emoji: '🎥', label: 'Video' },
@@ -31,11 +32,63 @@ const refreshBtn = document.getElementById('refresh-btn');
 const retryBtn = document.getElementById('retry-btn');
 const lastUpdatedEl = document.getElementById('last-updated');
 const statusBanner = document.getElementById('status-banner');
+const regionSelect = document.getElementById('region-select');
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let renderedAt = null;   // fetchedAt of what's currently on screen
 let hasRendered = false; // have we ever painted the feed?
+let region = null;       // active region id, or null until resolved
+let renderedRegion = null; // region of what's currently on screen
+
+// ─── Region ───────────────────────────────────────────────────────────────────
+
+/**
+ * Pick a starting region without asking permission or making a network call.
+ *
+ * An explicit choice always wins. Otherwise we guess from the browser's IANA
+ * timezone, which is synchronous, needs no permission, and is already exposed
+ * to every site. It identifies a zone rather than a city — Pacific can't
+ * distinguish LA from Seattle — so it only ever resolves to the metro that
+ * claims that zone, and the picker corrects the rest.
+ */
+function resolveRegion(regions, serverDefault) {
+  const stored = localStorage.getItem(REGION_KEY);
+  if (stored && regions.some(r => r.id === stored)) return stored;
+
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const match = regions.find(r => (r.primaryFor || []).includes(tz));
+    if (match) return match.id;
+  } catch {
+    // Intl is unavailable or threw — fall through to the default.
+  }
+  return serverDefault;
+}
+
+function populatePicker(regions, active) {
+  regionSelect.replaceChildren();
+  for (const r of regions) {
+    const opt = document.createElement('option');
+    opt.value = r.id;
+    opt.textContent = r.label;
+    if (r.id === active) opt.selected = true;
+    regionSelect.appendChild(opt);
+  }
+}
+
+async function initRegion() {
+  try {
+    const res = await fetch('/api/regions');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    region = resolveRegion(data.regions, data.default);
+    populatePicker(data.regions, region);
+  } catch (err) {
+    console.error('Failed to load regions:', err);
+    // The feed still works without a picker — the server falls back on its own.
+  }
+}
 
 // ─── Fetch Feed ───────────────────────────────────────────────────────────────
 
@@ -48,22 +101,27 @@ async function loadFeed({ force = false, silent = false } = {}) {
   if (!silent) showLoading();
 
   try {
+    const query = region ? `?region=${encodeURIComponent(region)}` : '';
     const response = force
-      ? await fetch('/api/refresh', { method: 'POST' })
-      : await fetch('/api/feed');
+      ? await fetch(`/api/refresh${query}`, { method: 'POST' })
+      : await fetch(`/api/feed${query}`);
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
     const data = await response.json();
+    const activeRegion = data.region ? data.region.id : null;
 
-    // Nothing new upstream — leave the DOM alone.
-    if (data.fetchedAt === renderedAt && hasRendered) {
+    // Nothing new upstream — leave the DOM alone. A region switch always
+    // repaints even when the timestamp is unchanged, since the local section
+    // differs while the rest of the payload doesn't.
+    if (data.fetchedAt === renderedAt && activeRegion === renderedRegion && hasRendered) {
       hideLoading();
       return;
     }
 
     renderFeed(data);
     renderedAt = data.fetchedAt;
+    renderedRegion = activeRegion;
     updateLastRefreshed();
   } catch (err) {
     console.error('Failed to load feed:', err);
@@ -108,7 +166,11 @@ function renderFeed(data) {
     const items = data.categories[catKey];
     if (!items || items.length === 0) continue;
 
-    const config = CATEGORY_CONFIG[catKey] || { emoji: '📄', label: catKey };
+    let config = CATEGORY_CONFIG[catKey] || { emoji: '📄', label: catKey };
+    // The local heading names whichever metro is active.
+    if (catKey === 'local' && data.region) {
+      config = { ...config, label: `Local — ${data.region.label}` };
+    }
     fragment.appendChild(createCategorySection(catKey, config, items));
   }
 
@@ -254,6 +316,14 @@ function formatTime(isoDate) {
 refreshBtn.addEventListener('click', () => loadFeed({ force: true }));
 retryBtn.addEventListener('click', () => loadFeed());
 
+// Switching region only re-assembles a cached payload server-side, so this is
+// a fast repaint rather than a refetch of anyone's feeds.
+regionSelect.addEventListener('change', () => {
+  region = regionSelect.value;
+  localStorage.setItem(REGION_KEY, region);
+  loadFeed();
+});
+
 // Catch up whenever the tab comes back to the foreground — a laptop that was
 // asleep for six hours should not show six-hour-old headlines.
 document.addEventListener('visibilitychange', () => {
@@ -262,6 +332,10 @@ document.addEventListener('visibilitychange', () => {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
-loadFeed();
-setInterval(() => loadFeed({ silent: true }), POLL_INTERVAL);
-setInterval(retickTimestamps, CLOCK_INTERVAL);
+// Resolve the region first so the very first paint already has the right local
+// section — otherwise the reader sees LA flash before their own metro loads.
+initRegion().finally(() => {
+  loadFeed();
+  setInterval(() => loadFeed({ silent: true }), POLL_INTERVAL);
+  setInterval(retickTimestamps, CLOCK_INTERVAL);
+});
